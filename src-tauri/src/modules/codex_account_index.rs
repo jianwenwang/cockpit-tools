@@ -998,7 +998,7 @@ pub fn save_account(account: &CodexAccount) -> Result<(), String> {
 }
 
 /// Quota, subscription and credential maintenance own their refreshed fields, not the
-/// user's proxy choice. Merge the latest durable choice in the same transaction
+/// user's proxy or model mappings. Merge the latest durable choices in the same transaction
 /// as the write, and return that exact snapshot to account-returning callers.
 pub(crate) fn save_account_preserving_egress_proxy(
     account: &CodexAccount,
@@ -1011,6 +1011,9 @@ pub(crate) fn save_account_preserving_egress_proxy(
     let mut merged = account.clone();
     merged.egress_proxy_url = current.egress_proxy_url;
     merged.egress_proxy_disabled = current.egress_proxy_disabled;
+    merged.api_model_mappings = current.api_model_mappings;
+    merged.api_model_mappings_customized = current.api_model_mappings_customized;
+    merged.api_model_context_windows = current.api_model_context_windows;
     save_account_with_tombstone_guard(&merged)?;
     Ok(merged)
 }

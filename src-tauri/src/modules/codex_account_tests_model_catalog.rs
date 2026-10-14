@@ -163,6 +163,10 @@
             "用户自定义别名不能被清理"
         );
         for expected in [
+            "gpt-6.1-sol",
+            "gpt-6-astra",
+            "gpt-6-sol",
+            "gpt-6-luna",
             "gpt-5.6-luna",
             "gpt-5.6-sol",
             "gpt-5.6-terra",
@@ -282,6 +286,93 @@
         assert_eq!(normalized.get("custom-flash").copied(), Some(900_000));
         assert!(!normalized.contains_key("stale-model"));
         assert!(!normalized.contains_key("keep-default"));
+    }
+
+    #[test]
+    fn api_model_mappings_edits_and_clear_survive_account_reload() {
+        let _lock = crate::modules::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _env = TestEnvGuard::new("codex-model-mapping-reload");
+        // Exercise both official DeepSeek normalization and an ordinary third-party key.
+        for (id, base_url) in [
+            ("deepseek-mapping-reload", "https://api.deepseek.com"),
+            ("third-party-mapping-reload", "https://provider.example.invalid/v1"),
+        ] {
+            let account = CodexAccount::new_api_key(
+                id.to_string(), "mapping@example.invalid".to_string(), "sk-fixture".to_string(),
+                CodexApiProviderMode::Custom, Some(base_url.to_string()),
+                None, None, vec!["deepseek-flash".to_string()],
+            );
+            save_account(&account).unwrap();
+            let mappings = vec![
+                CodexApiModelMapping {
+                    client_model: "gpt-6.1-sol".to_string(),
+                    upstream_model: "custom-pro".to_string(),
+                },
+                CodexApiModelMapping {
+                    client_model: "custom-alias".to_string(),
+                    upstream_model: "custom-flash".to_string(),
+                },
+            ];
+            let windows = HashMap::from([("gpt-6.1-sol".to_string(), 900_000)]);
+            let saved = super::update_account_api_model_mappings(
+                id, mappings.clone(), Some(windows.clone()),
+            ).unwrap();
+            assert!(saved.api_model_mappings_customized);
+            for _ in 0..2 {
+                let loaded = load_account(id).unwrap();
+                assert_eq!(loaded.api_model_mappings, mappings);
+                assert_eq!(loaded.api_model_context_windows, windows);
+                assert!(loaded.api_model_mappings_customized);
+            }
+            // A duplicate must fail without replacing the last successful edit.
+            assert!(super::update_account_api_model_mappings(
+                id, vec![mappings[0].clone(), mappings[0].clone()], None,
+            ).is_err());
+            assert_eq!(load_account(id).unwrap().api_model_mappings, mappings);
+            super::update_account_api_model_mappings(id, Vec::new(), Some(HashMap::new())).unwrap();
+            let loaded = load_account(id).unwrap();
+            assert!(loaded.api_model_mappings.is_empty());
+            assert!(loaded.api_model_context_windows.is_empty());
+            assert!(loaded.api_model_mappings_customized);
+        }
+    }
+
+    #[test]
+    fn background_account_refresh_preserves_saved_model_mappings() {
+        let _lock = crate::modules::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _env = TestEnvGuard::new("codex-model-mapping-refresh");
+        let snapshot = CodexAccount::new_api_key(
+            "mapping-refresh".to_string(), "mapping@example.invalid".to_string(),
+            "sk-fixture".to_string(), CodexApiProviderMode::Custom,
+            Some("https://api.deepseek.com".to_string()), None, None,
+            vec!["deepseek-flash".to_string()],
+        );
+        save_account(&snapshot).unwrap();
+        let edited = super::update_account_api_model_mappings(
+            &snapshot.id,
+            vec![CodexApiModelMapping {
+                client_model: "gpt-6-astra".to_string(),
+                upstream_model: "custom-flash".to_string(),
+            }],
+            Some(HashMap::from([("gpt-6-astra".to_string(), 512_000)])),
+        ).unwrap();
+        let mut refreshed = snapshot.clone();
+        refreshed.usage_updated_at = Some(123);
+        let returned = super::save_account_preserving_egress_proxy(&refreshed).unwrap();
+        assert_eq!(returned.api_model_mappings, edited.api_model_mappings);
+        assert_eq!(returned.api_model_context_windows, edited.api_model_context_windows);
+        assert!(returned.api_model_mappings_customized);
+        let loaded = load_account(&snapshot.id).unwrap();
+        assert_eq!(loaded.api_model_mappings, edited.api_model_mappings);
+        assert_eq!(loaded.usage_updated_at, Some(123));
+        // Even clearing all rows must survive a delayed refresh with nonempty mappings.
+        super::update_account_api_model_mappings(&snapshot.id, Vec::new(), Some(HashMap::new())).unwrap();
+        super::save_account_preserving_egress_proxy(&edited).unwrap();
+        assert!(load_account(&snapshot.id).unwrap().api_model_mappings.is_empty());
     }
 
     #[test]

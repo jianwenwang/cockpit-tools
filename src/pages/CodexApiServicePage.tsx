@@ -474,10 +474,17 @@ function parseModelAliasText(value: string): CodexLocalAccessModelAlias[] {
 }
 
 const DEEPSEEK_OFFICIAL_API_MODEL_MAPPINGS: CodexApiModelMapping[] = [
-  { client_model: "gpt-5.6-sol", upstream_model: "deepseek-flash" },
-  { client_model: "gpt-5.6-terra", upstream_model: "deepseek-v4-pro" },
+  { client_model: "gpt-6.1-sol", upstream_model: "deepseek-flash" },
+  { client_model: "gpt-6-astra", upstream_model: "deepseek-flash" },
+  { client_model: "gpt-6-sol", upstream_model: "deepseek-flash" },
+  { client_model: "gpt-6-luna", upstream_model: "deepseek-flash" },
+  { client_model: "gpt-5.5", upstream_model: "deepseek-flash" },
+  { client_model: "gpt-5.6-sol", upstream_model: "deepseek-v4-pro" },
+  { client_model: "gpt-5.6-terra", upstream_model: "deepseek-v4-flash-vision-exp" },
+  { client_model: "deepseek-flash", upstream_model: "deepseek-flash" },
   { client_model: "deepseek-v4-flash", upstream_model: "deepseek-v4-flash" },
   { client_model: "deepseek-v4-pro", upstream_model: "deepseek-v4-pro" },
+  { client_model: "deepseek-v4-flash-vision-exp", upstream_model: "deepseek-v4-flash-vision-exp" },
 ];
 
 type AccountModelMappingDraft = {
@@ -2556,11 +2563,17 @@ export function useCodexApiServicePageController() {
     await runAction(
       async () => {
         for (const payload of payloads) {
-          await updateCodexAccountApiModelMappings(
-            payload.accountId,
-            payload.mappings,
-            payload.windows,
-          );
+          try {
+            const saved = await updateCodexAccountApiModelMappings(
+              payload.accountId,
+              payload.mappings,
+              payload.windows,
+            );
+            useCodexAccountStore.getState().applyAccountSnapshot(saved);
+          } catch (error) {
+            setAccountModelMappingError(String(error).replace(/^Error:\s*/, ""));
+            throw error;
+          }
         }
         await fetchAccounts();
         setAccountModelMappingsOpen(false);
