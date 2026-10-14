@@ -198,6 +198,9 @@ pub struct CodexAccount {
     /// API 服务按账号改写：调用方请求的模型 → 发给上游的模型。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub api_model_mappings: Vec<CodexApiModelMapping>,
+    /// 用户保存过映射（包括清空）；读取时不再套用默认映射迁移。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub api_model_mappings_customized: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub api_sync_model_catalog_to_codex: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -649,6 +652,7 @@ impl CodexAccount {
             api_model_catalog: Vec::new(),
             api_model_context_windows: HashMap::new(),
             api_model_mappings: Vec::new(),
+            api_model_mappings_customized: false,
             api_sync_model_catalog_to_codex: false,
             api_wire_api: None,
             api_supports_websockets: false,
