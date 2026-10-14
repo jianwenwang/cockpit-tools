@@ -457,9 +457,9 @@ function buildTaskDraft(
     modelReasoningEffort:
       task.model_reasoning_effort ?? matchedPreset?.default_reasoning_effort ?? '',
     scheduleKind: task.schedule.kind,
-    dailyTime: task.schedule.daily_time ?? '09:00',
+    dailyTime: normalizeTimeInput(task.schedule.daily_time ?? '') ?? '09:00',
     weeklyDays: task.schedule.weekly_days.length > 0 ? task.schedule.weekly_days : [1, 2, 3, 4, 5],
-    weeklyTime: task.schedule.weekly_time ?? '10:00',
+    weeklyTime: normalizeTimeInput(task.schedule.weekly_time ?? '') ?? '10:00',
     intervalHours: String(task.schedule.interval_hours ?? 6),
     quotaResetWindow: task.schedule.quota_reset_window ?? 'either',
     startupDelayMode: startupDelayMinutes > 0 ? 'delayed' : 'immediate',
@@ -867,21 +867,23 @@ function resolveAccountContextText(
   return accountName || workspaceTitle || '';
 }
 
-function parseTimeValue(value: string) {
-  const parts = value.trim().split(':');
-  if (parts.length !== 2) return null;
-  const hour = Number(parts[0]);
-  const minute = Number(parts[1]);
-  if (!Number.isFinite(hour) || !Number.isFinite(minute)) return null;
-  if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return null;
-  return { hour, minute };
+function normalizeTimeInput(value: string) {
+  // Native time pickers may return seconds; wakeup schedules use minute precision.
+  const match = value.trim().match(/^(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,3})?)?$/);
+  if (!match) return null;
+  const hour = Number(match[1]);
+  const minute = Number(match[2]);
+  const second = Number(match[3] ?? '0');
+  if (hour > 23 || minute > 59 || second > 59) return null;
+  return `${match[1]}:${match[2]}`;
 }
 
 function atLocalTime(base: Date, time: string) {
-  const parsed = parseTimeValue(time);
-  if (!parsed) return null;
+  const normalized = normalizeTimeInput(time);
+  if (!normalized) return null;
+  const [hour, minute] = normalized.split(':').map(Number);
   const next = new Date(base);
-  next.setHours(parsed.hour, parsed.minute, 0, 0);
+  next.setHours(hour, minute, 0, 0);
   return next;
 }
 
@@ -2344,6 +2346,16 @@ export function CodexWakeupContent({
       taskValidation.report('weeklyDays', t('codex.wakeup.weeklyDaysRequired'));
       return;
     }
+    const dailyTime = normalizeTimeInput(taskDraft.dailyTime);
+    const weeklyTime = normalizeTimeInput(taskDraft.weeklyTime);
+    if (taskDraft.scheduleKind === 'daily' && !dailyTime) {
+      taskValidation.report('dailyTime', t('wakeup.form.nextRunsEmpty', '请选择触发时间'));
+      return;
+    }
+    if (taskDraft.scheduleKind === 'weekly' && !weeklyTime) {
+      taskValidation.report('weeklyTime', t('wakeup.form.nextRunsEmpty', '请选择触发时间'));
+      return;
+    }
     setTaskModalError(null);
 
     const now = Math.floor(Date.now() / 1000);
@@ -2375,9 +2387,9 @@ export function CodexWakeupContent({
       model_reasoning_effort: taskDraft.modelReasoningEffort || undefined,
       schedule: {
         kind: taskDraft.scheduleKind,
-        daily_time: taskDraft.scheduleKind === 'daily' ? taskDraft.dailyTime : undefined,
+        daily_time: taskDraft.scheduleKind === 'daily' ? dailyTime ?? undefined : undefined,
         weekly_days: taskDraft.scheduleKind === 'weekly' ? taskDraft.weeklyDays : [],
-        weekly_time: taskDraft.scheduleKind === 'weekly' ? taskDraft.weeklyTime : undefined,
+        weekly_time: taskDraft.scheduleKind === 'weekly' ? weeklyTime ?? undefined : undefined,
         interval_hours:
           taskDraft.scheduleKind === 'interval'
             ? Math.max(1, Number(taskDraft.intervalHours) || 1)
@@ -3301,8 +3313,9 @@ export function CodexWakeupContent({
               </div>
 
               {taskDraft.scheduleKind === 'daily' && (
-                <div className="wakeup-form-group">
+                <div className="wakeup-form-group" data-wakeup-field="dailyTime" tabIndex={-1}>
                   <label>{t('codex.wakeup.dailyTimeLabel')}</label>
+                  {taskValidation.message('dailyTime')}
                   <div className="wakeup-chip-grid">
                     {QUICK_TIME_OPTIONS.map((time) => (
                       <button
@@ -3317,9 +3330,14 @@ export function CodexWakeupContent({
                   </div>
                   <input
                     type="time"
+                    step={60}
                     className="wakeup-input wakeup-input-time"
                     value={taskDraft.dailyTime}
-                    onChange={(event) => setTaskDraft((current) => ({ ...current, dailyTime: event.target.value }))}
+                    onChange={(event) => {
+                      const value = event.currentTarget.value;
+                      const dailyTime = normalizeTimeInput(value) ?? value;
+                      setTaskDraft((current) => ({ ...current, dailyTime }));
+                    }}
                   />
                 </div>
               )}
@@ -3402,8 +3420,9 @@ export function CodexWakeupContent({
                       })}
                     </div>
                   </div>
-                  <div className="wakeup-form-group">
+                  <div className="wakeup-form-group" data-wakeup-field="weeklyTime" tabIndex={-1}>
                     <label>{t('codex.wakeup.weeklyTimeLabel')}</label>
+                    {taskValidation.message('weeklyTime')}
                     <div className="wakeup-chip-grid">
                       {QUICK_TIME_OPTIONS.map((time) => (
                         <button
@@ -3418,9 +3437,14 @@ export function CodexWakeupContent({
                     </div>
                     <input
                       type="time"
+                      step={60}
                       className="wakeup-input wakeup-input-time"
                       value={taskDraft.weeklyTime}
-                      onChange={(event) => setTaskDraft((current) => ({ ...current, weeklyTime: event.target.value }))}
+                      onChange={(event) => {
+                        const value = event.currentTarget.value;
+                        const weeklyTime = normalizeTimeInput(value) ?? value;
+                        setTaskDraft((current) => ({ ...current, weeklyTime }));
+                      }}
                     />
                   </div>
                 </>
