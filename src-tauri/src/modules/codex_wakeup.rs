@@ -65,7 +65,8 @@ const LEGACY_CODEX_MODEL_PRESET_MODELS: &[&str] = &[
 #[path = "codex_wakeup_task_state.rs"]
 mod task_state;
 pub use task_state::{
-    authorize_task_dispatch, claim_task_run, mark_task_run_failed, try_task_run_lease,
+    authorize_task_dispatch, claim_task_run, mark_task_run_failed, observe_quota_refresh,
+    try_task_run_lease,
 };
 
 static TASKS_LOCK: std::sync::LazyLock<Mutex<()>> = std::sync::LazyLock::new(|| Mutex::new(()));
@@ -190,6 +191,9 @@ pub struct CodexWakeupTask {
     pub updated_at: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_run_at: Option<i64>,
+    /// Pending quota recovery observed by a successful quota refresh.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota_reset_detected_at: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_status: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2145,6 +2149,7 @@ fn normalize_task(raw: &CodexWakeupTask) -> CodexWakeupTask {
             now
         },
         last_run_at: raw.last_run_at,
+        quota_reset_detected_at: raw.quota_reset_detected_at,
         last_status: raw.last_status.clone(),
         last_message: raw.last_message.clone(),
         last_success_count: raw.last_success_count,
@@ -3345,6 +3350,7 @@ mod tests {
             created_at: 1,
             updated_at: 1,
             last_run_at: None,
+            quota_reset_detected_at: None,
             last_status: None,
             last_message: None,
             last_success_count: None,

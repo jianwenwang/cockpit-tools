@@ -1728,10 +1728,16 @@ async fn refresh_account_quota_once(
         if result.plan_type.is_some() {
             sync_subscription_from_token(&mut account, result.plan_type.clone(), None);
         }
+        let previous_quota = account.quota.clone();
         account.replace_quota_preserving_team_history(result.quota.clone(), now_timestamp());
         account.quota_error = None;
         account.usage_updated_at = Some(now_timestamp());
         codex_account::save_account_preserving_egress_proxy(&account)?;
+        crate::modules::codex_wakeup::observe_quota_refresh(
+            account_id,
+            previous_quota.as_ref(),
+            &result.quota,
+        );
         return Ok(result.quota);
     }
 
@@ -1800,10 +1806,16 @@ async fn refresh_account_quota_once(
         ));
     }
 
+    let previous_quota = account.quota.clone();
     account.replace_quota_preserving_team_history(result.quota.clone(), now_timestamp());
     account.quota_error = None;
     account.usage_updated_at = Some(now_timestamp());
     codex_account::save_account_preserving_egress_proxy(&account)?;
+    crate::modules::codex_wakeup::observe_quota_refresh(
+        account_id,
+        previous_quota.as_ref(),
+        &result.quota,
+    );
 
     Ok(result.quota)
 }
@@ -1909,10 +1921,18 @@ pub async fn refresh_freshly_authorized_account_quota(
         sync_subscription_from_token(&mut latest, result.plan_type.clone(), None);
     }
     normalize_subscription_retry_state(&mut latest);
+    let previous_quota = latest.quota.clone();
     latest.replace_quota_preserving_team_history(result.quota.clone(), now_timestamp());
     latest.quota_error = None;
     latest.usage_updated_at = Some(now_timestamp());
     codex_account::save_account_preserving_egress_proxy(&latest)?;
+    if !latest.is_api_key_auth() {
+        crate::modules::codex_wakeup::observe_quota_refresh(
+            account_id,
+            previous_quota.as_ref(),
+            &result.quota,
+        );
+    }
 
     crate::modules::codex_local_access::reevaluate_bound_oauth_quota_reserve_after_refresh(
         account_id, true,
