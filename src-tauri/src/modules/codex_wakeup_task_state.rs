@@ -41,12 +41,118 @@ pub(super) fn preserve_run_metadata(next: &mut CodexWakeupState, current: &Codex
     for task in &mut next.tasks {
         if let Some(saved) = current.tasks.iter().find(|saved| saved.id == task.id) {
             task.last_run_at = saved.last_run_at;
+            task.quota_reset_detected_at = if task.account_ids == saved.account_ids
+                && task.schedule.kind == saved.schedule.kind
+                && task.schedule.quota_reset_window == saved.schedule.quota_reset_window
+            {
+                saved.quota_reset_detected_at
+            } else {
+                None
+            };
             task.last_status = saved.last_status.clone();
             task.last_message = saved.last_message.clone();
             task.last_success_count = saved.last_success_count;
             task.last_failure_count = saved.last_failure_count;
             task.last_duration_ms = saved.last_duration_ms;
         }
+    }
+}
+
+// A recovery can happen before the advertised reset deadline (for example,
+// after redeeming a reset credit). Observe only successful, saved snapshots.
+fn recovered_quota_windows(
+    previous: Option<&crate::models::codex::CodexQuota>,
+    current: &crate::models::codex::CodexQuota,
+    observed_at: i64,
+) -> (bool, bool) {
+    let Some(previous) = previous else {
+        return (false, false);
+    };
+    // Expired windows already have a scheduled trigger. Do not re-arm them
+    // when the post-run refresh finally reports their replenished quota.
+    let primary = previous.hourly_reset_time.is_some_and(|reset| reset > observed_at)
+        && previous.hourly_window_present != Some(false)
+        && current.hourly_window_present != Some(false)
+        && previous.hourly_window_minutes == current.hourly_window_minutes
+        && (0..=100).contains(&previous.hourly_percentage)
+        && (0..=100).contains(&current.hourly_percentage)
+        && current.hourly_percentage > previous.hourly_percentage;
+    let secondary = previous.weekly_reset_time.is_some_and(|reset| reset > observed_at)
+        && previous.weekly_window_present != Some(false)
+        && current.weekly_window_present != Some(false)
+        && previous.weekly_window_minutes == current.weekly_window_minutes
+        && (0..=100).contains(&previous.weekly_percentage)
+        && (0..=100).contains(&current.weekly_percentage)
+        && current.weekly_percentage > previous.weekly_percentage;
+    (primary, secondary)
+}
+
+fn record_quota_recovery_in_state(
+    state: &mut CodexWakeupState,
+    account_id: &str,
+    recovered: (bool, bool),
+    observed_at: i64,
+) -> bool {
+    if !state.enabled {
+        return false;
+    }
+    let mut changed = false;
+    for task in &mut state.tasks {
+        if !task.enabled
+            || task.schedule.kind != "quota_reset"
+            || !task.account_ids.iter().any(|id| id == account_id)
+        {
+            continue;
+        }
+        let matches = match task.schedule.quota_reset_window.as_deref().unwrap_or("either") {
+            "primary_window" => recovered.0,
+            "secondary_window" => recovered.1,
+            "either" => recovered.0 || recovered.1,
+            _ => false,
+        };
+        if matches {
+            // Keep a pending event newer than an existing claim, even if both
+            // occur within the same Unix second. The scheduler will wait until due.
+            task.quota_reset_detected_at = Some(
+                observed_at.max(task.last_run_at.unwrap_or(task.created_at).saturating_add(1)),
+            );
+            changed = true;
+        }
+    }
+    changed
+}
+
+pub fn observe_quota_refresh(
+    account_id: &str,
+    previous: Option<&crate::models::codex::CodexQuota>,
+    current: &crate::models::codex::CodexQuota,
+) {
+    let observed_at = now_ts();
+    let recovered = recovered_quota_windows(previous, current, observed_at);
+    if !recovered.0 && !recovered.1 {
+        return;
+    }
+    let result = (|| -> Result<bool, String> {
+        let _lock = TASKS_LOCK.lock().map_err(|_| "获取 Codex 唤醒任务锁失败")?;
+        let _file_lock = lock_task_state()?;
+        let mut state = read_state_file()?;
+        if !record_quota_recovery_in_state(&mut state, account_id, recovered, observed_at) {
+            return Ok(false);
+        }
+        refresh_next_run_at(&mut state);
+        save_json_atomic(&tasks_path()?, &state)?;
+        Ok(true)
+    })();
+    match result {
+        Ok(true) => {
+            logger::log_info(&format!(
+                "[CodexWakeup] 检测到配额提前恢复，触发匹配的唤醒任务: account_id={}, primary={}, secondary={}",
+                account_id, recovered.0, recovered.1
+            ));
+            crate::modules::codex_wakeup_scheduler::notify_quota_reset();
+        }
+        Ok(false) => {}
+        Err(error) => logger::log_warn(&format!("[CodexWakeup] 记录配额恢复事件失败: {}", error)),
     }
 }
 
@@ -250,6 +356,97 @@ mod tests {
             }]
         }))
         .unwrap()
+    }
+
+    fn quota() -> crate::models::codex::CodexQuota {
+        serde_json::from_value(serde_json::json!({
+            "hourly_percentage": 20, "hourly_reset_time": 1000,
+            "hourly_window_present": true, "hourly_window_minutes": 300,
+            "weekly_percentage": 30, "weekly_reset_time": 2000,
+            "weekly_window_present": true, "weekly_window_minutes": 10080
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn early_quota_recovery_detects_each_window_without_requiring_a_new_deadline() {
+        let before = quota();
+        let mut after = before.clone();
+        after.hourly_percentage = 100;
+        after.hourly_reset_time = None;
+        assert_eq!(recovered_quota_windows(Some(&before), &after, 100), (true, false));
+        after.weekly_percentage = 90; // Some quota may already be used after a reset.
+        assert_eq!(recovered_quota_windows(Some(&before), &after, 100), (true, true));
+        assert_eq!(recovered_quota_windows(None, &after, 100), (false, false));
+        assert_eq!(recovered_quota_windows(Some(&after), &after, 100), (false, false));
+        assert_eq!(recovered_quota_windows(Some(&before), &after, 2000), (false, false));
+        assert_eq!(recovered_quota_windows(Some(&before), &before, 100), (false, false));
+        after.hourly_percentage = 10;
+        after.weekly_percentage = 10;
+        assert_eq!(recovered_quota_windows(Some(&before), &after, 100), (false, false));
+    }
+
+    #[test]
+    fn missing_or_changed_windows_cannot_trigger_early_recovery() {
+        let before = quota();
+        let mut after = before.clone();
+        after.hourly_percentage = 100;
+        after.weekly_percentage = 100;
+        after.hourly_window_present = Some(false);
+        after.weekly_window_minutes = Some(300);
+        assert_eq!(recovered_quota_windows(Some(&before), &after, 100), (false, false));
+    }
+
+    #[test]
+    fn quota_recovery_respects_accounts_windows_and_enable_switches() {
+        let mut state = state();
+        state.tasks[0].schedule.kind = "quota_reset".into();
+        for (window, recovered, expected) in [
+            ("primary_window", (true, false), true),
+            ("primary_window", (false, true), false),
+            ("secondary_window", (true, false), false),
+            ("secondary_window", (false, true), true),
+            ("either", (true, true), true),
+        ] {
+            state.tasks[0].schedule.quota_reset_window = Some(window.into());
+            state.tasks[0].quota_reset_detected_at = None;
+            assert_eq!(record_quota_recovery_in_state(&mut state, "account-1", recovered, 100), expected);
+        }
+        assert!(!record_quota_recovery_in_state(&mut state, "other", (true, true), 200));
+        state.enabled = false;
+        assert!(!record_quota_recovery_in_state(&mut state, "account-1", (true, true), 200));
+        state.enabled = true;
+        state.tasks[0].enabled = false;
+        assert!(!record_quota_recovery_in_state(&mut state, "account-1", (true, true), 200));
+        state.tasks[0].enabled = true;
+        state.tasks[0].schedule.kind = "interval".into();
+        assert!(!record_quota_recovery_in_state(&mut state, "account-1", (true, true), 200));
+    }
+
+    #[test]
+    fn quota_recovery_survives_restart_and_stale_ui_save_and_is_claimed_once() {
+        let mut saved = state();
+        saved.tasks[0].schedule.kind = "quota_reset".into();
+        // No selected account exists on disk: only the recovery event can be due.
+        let mut stale_ui = saved.clone();
+        assert!(record_quota_recovery_in_state(&mut saved, "account-1", (true, true), 100));
+        let mut restored: CodexWakeupState =
+            serde_json::from_str(&serde_json::to_string(&saved).unwrap()).unwrap();
+        preserve_run_metadata(&mut stale_ui, &restored);
+        assert_eq!(stale_ui.tasks[0].quota_reset_detected_at, Some(100));
+        let now = chrono::TimeZone::timestamp_opt(&chrono::Local, 120, 0).unwrap();
+        assert_eq!(crate::modules::codex_wakeup_scheduler::current_due_at(&restored.tasks[0], now), Some(100));
+        assert!(claim_in_state(&mut restored, "task-1", Some(100), true, 120).is_some());
+        assert_eq!(crate::modules::codex_wakeup_scheduler::current_due_at(&restored.tasks[0], now), None);
+        assert!(claim_in_state(&mut restored, "task-1", Some(100), true, 120).is_none());
+        // A real subsequent reset within the claim's second is not lost.
+        assert!(record_quota_recovery_in_state(&mut restored, "account-1", (true, false), 120));
+        assert_eq!(restored.tasks[0].quota_reset_detected_at, Some(121));
+        assert!(claim_in_state(&mut restored, "task-1", Some(121), true, 120).is_none());
+        assert!(claim_in_state(&mut restored, "task-1", Some(121), true, 121).is_some());
+        stale_ui.tasks[0].schedule.quota_reset_window = Some("secondary_window".into());
+        preserve_run_metadata(&mut stale_ui, &restored);
+        assert_eq!(stale_ui.tasks[0].quota_reset_detected_at, None);
     }
 
     #[test]

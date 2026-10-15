@@ -6,6 +6,12 @@ use std::time::Duration;
 use tauri::AppHandle;
 use tokio::time::sleep;
 
+static QUOTA_RESET_CHANGED: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
+pub fn notify_quota_reset() {
+    QUOTA_RESET_CHANGED.notify_one();
+}
+
 static STARTED: OnceLock<Mutex<bool>> = OnceLock::new();
 static RUNNING_TASKS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 static ACTIVE_RUN_SCOPES: OnceLock<Mutex<HashMap<String, ActiveRunScope>>> = OnceLock::new();
@@ -139,6 +145,7 @@ pub(super) fn current_due_at(
             let last_run_at = task.last_run_at.unwrap_or(task.created_at);
             collect_task_reset_timestamps(task)
                 .into_iter()
+                .chain(task.quota_reset_detected_at)
                 .filter(|reset_at| *reset_at <= now.timestamp() && *reset_at > last_run_at)
                 .max()
         }
@@ -184,6 +191,9 @@ pub fn calculate_next_run_at(task: &codex_wakeup::CodexWakeupTask) -> Option<i64
         "quota_reset" => collect_task_reset_timestamps(task)
             .into_iter()
             .filter(|reset_at| *reset_at > now.timestamp())
+            .chain(task.quota_reset_detected_at.filter(|detected_at| {
+                *detected_at > task.last_run_at.unwrap_or(task.created_at)
+            }))
             .min(),
         "startup" => None,
         _ => None,
@@ -549,7 +559,10 @@ pub fn ensure_started(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         loop {
             run_scheduler_once(&app).await;
-            sleep(Duration::from_secs(30)).await;
+            tokio::select! {
+                _ = sleep(Duration::from_secs(30)) => {}
+                _ = QUOTA_RESET_CHANGED.notified() => {}
+            }
         }
     });
 }
