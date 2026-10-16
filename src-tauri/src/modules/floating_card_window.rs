@@ -140,7 +140,9 @@ fn clone_floating_card_window_config(
     config.label = label.to_string();
     config.create = false;
     config.visible = false;
-    if crate::modules::config::get_user_config().floating_card_minimal {
+    let user_config = config::get_user_config();
+    config.always_on_top = user_config.floating_card_always_on_top;
+    if user_config.floating_card_minimal {
         config.height = 110.0;
         config.min_height = Some(110.0);
     }
@@ -254,14 +256,14 @@ fn apply_corner_mask_to_view(view: &objc2_app_kit::NSView) -> Result<(), String>
 }
 
 pub fn apply_floating_card_always_on_top<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
-    let Some(window) = app.get_webview_window(FLOATING_CARD_WINDOW_LABEL) else {
-        return Ok(());
-    };
-
     let config = config::get_user_config();
-    window
-        .set_always_on_top(config.floating_card_always_on_top)
-        .map_err(|err| err.to_string())?;
+    for (label, window) in app.webview_windows() {
+        if label == FLOATING_CARD_WINDOW_LABEL || is_instance_floating_card_window_label(&label) {
+            window
+                .set_always_on_top(config.floating_card_always_on_top)
+                .map_err(|err| format!("{}: {}", label, err))?;
+        }
+    }
     Ok(())
 }
 

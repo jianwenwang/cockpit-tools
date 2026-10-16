@@ -315,6 +315,8 @@ export function FloatingCardWindow() {
     isPrivacyModeEnabledByDefault(),
   );
   const [alwaysOnTop, setAlwaysOnTop] = useState(false);
+  const [pinPending, setPinPending] = useState(false);
+  const pinPendingRef = useRef(false);
   const [confirmOnClose, setConfirmOnClose] = useState(true);
   const [closeConfirmOpen, setCloseConfirmOpen] = useState(false);
   const [closeConfirmSkipPrompt, setCloseConfirmSkipPrompt] = useState(false);
@@ -685,7 +687,13 @@ export function FloatingCardWindow() {
             ? Math.min(2, Math.max(0.3, config.ui_scale))
             : 1,
         );
-        setAlwaysOnTop(Boolean(config.floating_card_always_on_top));
+        // Instance cards can override the global default independently.
+        if (!pinPendingRef.current) {
+          const windowAlwaysOnTop = await getCurrentWindow().isAlwaysOnTop();
+          if (!disposed && !pinPendingRef.current) {
+            setAlwaysOnTop(windowAlwaysOnTop);
+          }
+        }
         setConfirmOnClose(config.floating_card_confirm_on_close !== false);
       } catch (error) {
         console.error('Failed to apply floating card config:', error);
@@ -1396,24 +1404,29 @@ export function FloatingCardWindow() {
   }, [selectedPlatform]);
 
   const handleTogglePin = useCallback(async () => {
-    const nextValue = !alwaysOnTop;
-    setAlwaysOnTop(nextValue);
+    if (pinPendingRef.current) return;
+    pinPendingRef.current = true;
+    setPinPending(true);
     try {
+      const nextValue = !(await getCurrentWindow().isAlwaysOnTop());
       if (isPrimaryFloatingCardWindow) {
         await setFloatingCardAlwaysOnTop(nextValue);
       } else {
         await setCurrentFloatingCardWindowAlwaysOnTop(nextValue);
       }
+      setAlwaysOnTop(nextValue);
     } catch (error) {
-      setAlwaysOnTop(!nextValue);
       setErrorText(
         t('floatingCard.errors.pinFailed', {
           error: String(error),
           defaultValue: '置顶设置失败：{{error}}',
         }),
       );
+    } finally {
+      pinPendingRef.current = false;
+      setPinPending(false);
     }
-  }, [alwaysOnTop, isPrimaryFloatingCardWindow, t]);
+  }, [isPrimaryFloatingCardWindow, t]);
 
   const hideCurrentFloatingCard = useCallback(async (): Promise<boolean> => {
     try {
@@ -1546,6 +1559,7 @@ export function FloatingCardWindow() {
             <button
               className="floating-card-icon-button"
               type="button"
+              disabled={pinPending}
               onClick={() => void handleTogglePin()}
               title={alwaysOnTop ? t('floatingCard.actions.unpin', '取消置顶') : t('floatingCard.actions.pin', '置顶')}
               aria-label={alwaysOnTop ? t('floatingCard.actions.unpin', '取消置顶') : t('floatingCard.actions.pin', '置顶')}
